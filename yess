@@ -1,0 +1,357 @@
+#!/bin/sh
+
+remoteit_config_dir='/etc/remoteit'
+if [ -n "$R3_CONFIG_DIR" ]; then
+  remoteit_config_dir=$R3_CONFIG_DIR
+fi
+
+remoteit_version_dir='latest'
+remoteit_version=''
+if [ -n "$R3_VERSION" ] && [ "$R3_VERSION" != "latest" ]; then
+  remoteit_version_dir="v$R3_VERSION"
+  remoteit_version="$R3_VERSION"
+fi
+
+repository_url="downloads.remote.it"
+if [ -n "$REPO_URL" ]; then
+  repository_url="$REPO_URL"
+fi
+
+regfile_exists='false'
+regfile_licensekey=''
+if [ -f $remoteit_config_dir/registration ]; then
+  regfile_exists='true'
+  regfile_licensekey=$(cat $remoteit_config_dir/registration)
+fi
+
+licensekey=
+if [ -n "$LICENSE_KEY" ]; then
+  licensekey=$LICENSE_KEY
+fi
+if [ -n "$R3_LICENSE_KEY" ]; then
+  licensekey=$R3_LICENSE_KEY
+fi
+if [ -n "$R3_REGISTRATION_CODE" ]; then
+  licensekey=$R3_REGISTRATION_CODE
+fi
+if [ -n "$R3_BULK_REGISTRATION_CODE" ]; then
+  licensekey=$R3_BULK_REGISTRATION_CODE
+fi
+
+echo "licensekey: $licensekey"
+
+# Root user detection
+if [ $(id -u) -eq 0 ]; then
+  sudo_cmd=''
+else
+  sudo_cmd='sudo -E'
+fi
+
+# Check for existing claim code in the config file
+claimcode=""
+if [ -f $remoteit_config_dir/config.json ]; then
+  claimcode=$(grep -o '"claim": *"[^"]*"' $remoteit_config_dir/config.json)
+fi
+
+if [ ! "$claimcode" = "" ]; then
+  echo "There is already a claim code so skipping license key registration"
+elif [ "$regfile_exists" = "true" ]; then
+  echo "There is already a registration file so skipping license key registration"
+elif [ ! -z "$licensekey" ]; then
+  echo "Creating registration file"
+  $sudo_cmd mkdir -p $remoteit_config_dir
+  $sudo_cmd sh -c "echo $licensekey > $remoteit_config_dir/registration"
+else
+  echo "No R3_LICENSE_KEY or R3_REGISTRATION_CODE variable set for new install so look for CLAIM CODE"
+fi
+
+# OS/Distro Detection
+KNOWN_DISTRIBUTION="(debian|ubuntu|redhat|centos|opensuse|amazon|arista|suse|raspbian|openwrt|archlinux|oracle|manjaro|edgeos|alpine)"
+DISTRIBUTION=""
+
+LSB_RELEASE=$(lsb_release -d 2>/dev/null | grep -i -Eo $KNOWN_DISTRIBUTION | head -n1 | tr '[A-Z]' '[a-z]')
+ETC_ISSUE=$(grep -i -Eo $KNOWN_DISTRIBUTION /etc/issue 2>/dev/null | head -n1 | tr '[A-Z]' '[a-z]')
+ETC_EOS_RELEASE=$(grep -Eo $KNOWN_DISTRIBUTION /etc/Eos-release 2>/dev/null | head -n1 | tr '[A-Z]' '[a-z]')
+ETC_OS_RELEASE=$(grep -i -m1 -Eo $KNOWN_DISTRIBUTION /etc/os-release 2>/dev/null | head -n1 | tr '[A-Z]' '[a-z]')
+OPENWRT_RELEASE=$(grep -i -m1 -Eo $KNOWN_DISTRIBUTION /etc/openwrt_release 2>/dev/null | head -n1 | tr '[A-Z]' '[a-z]')
+UNAME_S=$(uname -s 2>/dev/null | tr '[A-Z]' '[a-z]')
+
+if [ ! -z "$LSB_RELEASE" ]; then
+  DISTRIBUTION=$LSB_RELEASE
+elif [ ! -z "$ETC_ISSUE" ]; then
+  DISTRIBUTION=$ETC_ISSUE
+elif [ ! -z "$ETC_EOS_RELEASE" ]; then
+  DISTRIBUTION=$ETC_EOS_RELEASE
+elif [ ! -z "$ETC_OS_RELEASE" ]; then
+  DISTRIBUTION=$ETC_OS_RELEASE
+elif [ ! -z "$OPENWRT_RELEASE" ]; then
+  DISTRIBUTION=$OPENWRT_RELEASE
+else
+  DISTRIBUTION=$UNAME_S
+fi
+
+echo "* Distribution: $DISTRIBUTION"
+echo ""
+
+if [ "$DISTRIBUTION" = "darwin" ]; then
+  OS="macOS"
+elif [ "$DISTRIBUTION" = "linux" ]; then
+  OS="Raspbian"
+elif [ "$DISTRIBUTION" = "raspbian" ]; then
+  OS="Raspbian"
+elif [ "$DISTRIBUTION" = "debian" ] || [ "$DISTRIBUTION" = "ubuntu" ]; then
+  OS="Debian"
+  if [ "$DISTRIBUTION" = "ubuntu" ]; then
+    # Check if this is actually a Jetson system
+    if [ -f /etc/nv_tegra_release ]; then
+      if [ "$(cat /etc/nv_tegra_release | grep -io 'BOARD')" != "" ]; then
+        OS="Jetson"
+      fi
+    fi
+  fi
+  if [ "$DISTRIBUTION" = "debian" ]; then
+    # Check if this is actually a Raspberry Pi system
+    if [ -f /proc/cpuinfo ]; then
+      if [ "$(cat /proc/cpuinfo | grep -io 'raspberry')" != "" ]; then
+        OS="Raspbian"
+      fi
+    fi
+    if [ -f /proc/device-tree/model ]; then
+      if [ "$(cat /proc/device-tree/model | grep -aio 'tinker board')" != "" ]; then
+        OS="Tinkerboard"
+      fi
+    fi
+  fi
+elif [ "$DISTRIBUTION" = "edgeos" ]; then
+  OS="EdgeOS"
+elif [ -f /etc/redhat-release ] || [ "$DISTRIBUTION" = "redhat" ] || [ "$DISTRIBUTION" = "centos" ] || [ "$DISTRIBUTION" = "amazon" ]; then
+  OS="RedHat"
+# Some newer distros like Amazon may not have a redhat-release file
+elif [ -f /etc/system-release ] || [ "$DISTRIBUTION" = "amazon" ]; then
+  OS="RedHat"
+# Arista is based off of Fedora14/18 but do not have /etc/redhat-release
+elif [ -f /etc/Eos-release ] || [ "$DISTRIBUTION" = "arista" ]; then
+  OS="RedHat"
+# Photon is made by VMWare and is a liteweight linux for cloud.
+elif [ -f /etc/photon-release ] || [ "$DISTRIBUTION" = "photon" ]; then
+  OS="RedHat"
+# openSUSE and SUSE use /etc/SuSE-release or /etc/os-release
+elif [ -f /etc/SuSE-release ] || [ "$DISTRIBUTION" = "suse" ] || [ "$DISTRIBUTION" = "opensuse" ]; then
+  OS="SUSE"
+elif [ "$DISTRIBUTION" = "openwrt" ]; then
+  OS="OpenWrt"
+elif [ "$DISTRIBUTION" = "archlinux" ] || [ "$DISTRIBUTION" = "manjaro" ]; then
+  OS="ArchLinux"
+elif [ "$DISTRIBUTION" = "alpine" ]; then
+  OS="Alpine"
+fi
+
+echo "* OS: $OS"
+echo ""
+
+# Install the necessary package sources
+if [ "$OS" = "RedHat" ] || [ "$OS" = "SUSE" ]; then
+  UNAME_M=$(uname -m)
+  if [ "$UNAME_M" = "i686" ] || [ "$UNAME_M" = "i386" ] || [ "$UNAME_M" = "x86" ]; then
+    ARCHI="i386"
+  elif [ "$UNAME_M" = "aarch64" ]; then
+    ARCHI="aarch64"
+  else
+    ARCHI="x86_64"
+  fi
+
+  PKG_MANAGER_UPDATE_CMD=""
+  PKG_MANAGER_INSTALL_CMD=""
+  if [ $(command -v yum) ]; then
+    PKG_MANAGER_UPDATE_CMD="yum update -y"
+    PKG_MANAGER_INSTALL_CMD="yum install -y"
+  elif [ $(command -v zypper) ]; then
+    PKG_MANAGER_UPDATE_CMD="zypper --non-interactive refresh"
+    PKG_MANAGER_INSTALL_CMD="zypper --non-interactive install --allow-unsigned-rpm"
+  elif [ $(command -v dnf) ]; then
+    PKG_MANAGER_UPDATE_CMD="dnf makecache -y"
+    PKG_MANAGER_INSTALL_CMD="dnf install -y"
+  fi
+  echo "update command: $sudo_cmd $PKG_MANAGER_UPDATE_CMD"
+  $sudo_cmd $PKG_MANAGER_UPDATE_CMD
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit.${ARCHI}.rpm"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}-1.${ARCHI}.rpm"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.rpm"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.rpm"
+  echo "$sudo_cmd $PKG_MANAGER_INSTALL_CMD /tmp/remoteit.rpm"
+  $sudo_cmd $PKG_MANAGER_INSTALL_CMD /tmp/remoteit.rpm
+elif [ "$OS" = "Debian" ]; then
+  echo ""
+  echo "* Installing apt-transport-https and jq"
+  echo ""
+  $sudo_cmd apt-get update || echo "'apt-get update' failed, the script will not install the latest version of apt-transport-https."
+  if [ -z "$sudo_cmd" ]; then
+    # if $sudo_cmd is empty, doing `$sudo_cmd X=Y command` fails with
+    # `X=Y: command not found`; therefore we don't prefix the command with
+    # $sudo_cmd at all in this case
+    DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https jq
+  else
+    $sudo_cmd DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https jq
+  fi
+
+  ARCHI=$(dpkg --print-architecture)
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit.${ARCHI}.deb"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}.${ARCHI}.deb"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd apt-get install -y /tmp/remoteit.deb
+elif [ "$OS" = "EdgeOS" ]; then
+  echo ""
+  echo "* Installing apt-transport-https and jq"
+  echo ""
+  $sudo_cmd apt-get update || echo "'apt-get update failed', the script will not install the latest version of apt-transport-https."
+  if [ -z "$sudo_cmd" ]; then
+    # if $sudo_cmd is empty, doing `$sudo_cmd X=Y command` fails with
+    # `X=Y: command not found`; therefore we don't prefix the command with
+    # $sudo_cmd at all in this case
+    DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https jq
+  else
+    $sudo_cmd DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https jq
+  fi
+
+  ARCHI=$(dpkg --print-architecture)
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit.${ARCHI}.edgerouter.deb"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}.${ARCHI}.edgerouter.deb"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd apt-get install -y /tmp/remoteit.deb
+elif [ "$OS" = "Raspbian" ]; then
+  ARCHI=$(dpkg --print-architecture)
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit.${ARCHI}.rpi.deb"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}.${ARCHI}.rpi.deb"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd apt-get install -y /tmp/remoteit.deb
+elif [ "$OS" = "Jetson" ]; then
+  ARCHI=$(dpkg --print-architecture)
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit.${ARCHI}.jetson.deb"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}.${ARCHI}.jetson.deb"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd apt-get install -y /tmp/remoteit.deb
+elif [ "$OS" = "Tinkerboard" ]; then
+  ARCHI=$(dpkg --print-architecture)
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit.${ARCHI}.tinkerboard.deb"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}.${ARCHI}.tinkerboard.deb"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.deb"
+  $sudo_cmd apt-get install -y /tmp/remoteit.deb
+elif [ "$OS" = "OpenWrt" ]; then
+  . /etc/openwrt_release
+  ARCHI=${DISTRIB_ARCH:-arm_cortex-a9}
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit.ipk"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit_${remoteit_version}.ipk"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.ipk"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.ipk"
+  $sudo_cmd opkg update
+  if [ -z "$sudo_cmd" ]; then
+    # if $sudo_cmd is empty, doing `$sudo_cmd X=Y command` fails with
+    # `X=Y: command not found`; therefore we don't prefix the command with
+    # $sudo_cmd at all in this case
+    DISTRIB_ARCH=${ARCHI} opkg install /tmp/remoteit.ipk
+  else
+    $sudo_cmd DISTRIB_ARCH=${ARCHI} opkg install /tmp/remoteit.ipk
+  fi
+elif [ "$OS" = "ArchLinux" ]; then
+  UNAME_M=$(uname -m)
+  if [ "$UNAME_M" = "i686" ] || [ "$UNAME_M" = "i386" ] || [ "$UNAME_M" = "x86" ]; then
+    # ARCHI="i386"
+    echo "Unsupported Arch Linux machine type: $UNAME_M"
+    echo ""
+    exit;
+  elif [ "$UNAME_M" = "aarch64" ]; then
+    # ARCHI="aarch64"
+    echo "Unsupported Arch Linux machine type: $UNAME_M"
+    echo ""
+    exit;
+  else
+    ARCHI="x86_64"
+  fi
+
+  $sudo_cmd pacman -Sy
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit-${ARCHI}.pkg.tar.zst"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}-${ARCHI}.pkg.tar.zst"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.pkg.tar.zst"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.pkg.tar.zst"
+  $sudo_cmd pacman -U --noconfirm /tmp/remoteit.pkg.tar.zst
+elif [ "$OS" = "Alpine" ]; then
+  UNAME_M=$(uname -m)
+  ARCHI=$UNAME_M
+
+  echo "* Installing the remoteit Agent package for ${ARCHI}"
+  echo ""
+
+  download_filename="remoteit-${ARCHI}.apk"
+  if [ "$remoteit_version_dir" != "latest" ]; then
+    download_filename="remoteit-${remoteit_version}-r1-${ARCHI}.apk"
+  fi
+  echo "command: curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.apk"
+  $sudo_cmd sh -c "curl https://${repository_url}/remoteit/${remoteit_version_dir}/${download_filename} --output /tmp/remoteit.apk"
+  $sudo_cmd apk add --allow-untrusted /tmp/remoteit.apk
+else
+  if [ "$OS" = "macOS" ]; then
+    echo "The remoteit device package cannot be installed directly onto a macOS system."
+    echo ""
+    echo "Please try one of the following other options:"
+    echo "- Remoteit Desktop (https://www.remote.it/getting-started/mac)"
+    echo "- Remoteit CLI (https://www.remote.it/download-list?platform-list=mac&products=cli#Download-Results)"
+    echo "- remoteit-agent for Docker (https://hub.docker.com/r/remoteit/remoteit-agent)"
+  else
+    sh -c "$(curl -sL https://downloads.remote.it/remoteit/distributiontest.sh)"
+  fi
+  echo ""
+  exit;
+fi
